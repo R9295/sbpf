@@ -12,3 +12,4 @@ edition = "2018"
 solana-sbpf = { path = "../", features = ["debugger"] }
 test_utils = { path = "../test_utils/" }
 clap = "3.0.0-beta.2"
+stats_alloc = "0.1.10"

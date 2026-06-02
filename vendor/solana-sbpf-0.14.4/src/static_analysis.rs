@@ -17,6 +17,25 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// The last register is the program counter (aka pc).
 pub type RegisterTraceEntry = [u64; 12];
 
+/// Host allocation counters recorded at a point in time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SyscallAllocationSnapshot {
+    /// Count of host allocation operations.
+    pub allocations: u64,
+    /// Bytes requested from host allocation operations.
+    pub allocated_bytes: u64,
+}
+
+impl SyscallAllocationSnapshot {
+    /// Returns the saturating delta from an earlier snapshot.
+    pub fn delta_since(self, earlier: Self) -> Self {
+        Self {
+            allocations: self.allocations.saturating_sub(earlier.allocations),
+            allocated_bytes: self.allocated_bytes.saturating_sub(earlier.allocated_bytes),
+        }
+    }
+}
+
 /// Native instruction count recorded for one syscall invocation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SyscallTraceEntry {
@@ -30,6 +49,10 @@ pub struct SyscallTraceEntry {
     ///
     /// This is zero when the host does not expose a userspace `rdpmc` perf counter.
     pub native_instruction_count: u64,
+    /// Host allocation operations performed while handling the syscall.
+    pub host_allocations: u64,
+    /// Host bytes allocated while handling the syscall.
+    pub host_allocated_bytes: u64,
 }
 
 /// Used for topological sort

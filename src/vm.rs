@@ -19,7 +19,10 @@ use crate::{
     interpreter::Interpreter,
     memory_region::MemoryMapping,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::{Analysis, DummyContextObject, RegisterTraceEntry, SyscallTraceEntry},
+    static_analysis::{
+        Analysis, DummyContextObject, RegisterTraceEntry, SyscallAllocationSnapshot,
+        SyscallTraceEntry,
+    },
 };
 // Re-export defaults for direct access without the module path.
 pub use defaults::get_stack_frame_size;
@@ -34,6 +37,22 @@ use std::sync::Arc;
 use rand::{thread_rng, Rng};
 #[cfg(all(feature = "jit", feature = "shuttle-test"))]
 use shuttle::rand::{thread_rng, Rng};
+
+/// Function used to sample host allocation counters for syscall tracing.
+pub type SyscallAllocationSampler = fn() -> SyscallAllocationSnapshot;
+
+static SYSCALL_ALLOCATION_SAMPLER: std::sync::RwLock<Option<SyscallAllocationSampler>> =
+    std::sync::RwLock::new(None);
+
+/// Installs the host allocation sampler used by syscall tracing.
+pub fn set_syscall_allocation_sampler(sampler: SyscallAllocationSampler) {
+    *SYSCALL_ALLOCATION_SAMPLER.write().unwrap() = Some(sampler);
+}
+
+fn read_syscall_allocation_snapshot() -> Option<SyscallAllocationSnapshot> {
+    let sampler = *SYSCALL_ALLOCATION_SAMPLER.read().unwrap();
+    sampler.map(|sampler| sampler())
+}
 
 /// Returns (and if not done before generates) the encryption key for the VM pointer
 #[cfg(feature = "jit")]
@@ -527,9 +546,10 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         syscall_hash: u32,
     ) {
         let cu_start = self.context().get_remaining();
+        let allocation_start = read_syscall_allocation_snapshot();
         let native_start = self.read_syscall_native_instruction_count();
         self.invoke_function(function);
-        self.push_syscall_trace(pc, syscall_hash, native_start, cu_start);
+        self.push_syscall_trace(pc, syscall_hash, native_start, cu_start, allocation_start);
     }
 
     fn read_syscall_native_instruction_count(&mut self) -> Option<u64> {
@@ -542,6 +562,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         syscall_hash: u32,
         native_start: Option<u64>,
         cu_start: u64,
+        allocation_start: Option<SyscallAllocationSnapshot>,
     ) {
         let native_instruction_count = native_start
             .and_then(|native_start| {
@@ -550,11 +571,18 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             })
             .unwrap_or(0);
         let compute_units = cu_start.saturating_sub(self.context().get_remaining());
+        let allocation_delta = allocation_start
+            .and_then(|allocation_start| {
+                read_syscall_allocation_snapshot().map(|end| end.delta_since(allocation_start))
+            })
+            .unwrap_or_default();
         self.syscall_trace.push(SyscallTraceEntry {
             pc,
             syscall_hash,
             compute_units,
             native_instruction_count,
+            host_allocations: allocation_delta.allocations,
+            host_allocated_bytes: allocation_delta.allocated_bytes,
         });
     }
 
@@ -607,14 +635,14 @@ pub(crate) fn invoke_function_traced_jit<C: ContextObject>(
     d: u64,
     e: u64,
 ) {
-    let (native_start, cu_start) = unsafe {
+    let (native_start, cu_start, allocation_start) = unsafe {
         let mut vm: EncryptedHostAddressToEbpfVm<C> =
             EncryptedHostAddressToEbpfVm(vm_addr, PhantomData);
         vm.with_vm(|vm| {
-            (
-                vm.read_syscall_native_instruction_count(),
-                vm.context().get_remaining(),
-            )
+            let cu_start = vm.context().get_remaining();
+            let allocation_start = read_syscall_allocation_snapshot();
+            let native_start = vm.read_syscall_native_instruction_count();
+            (native_start, cu_start, allocation_start)
         })
     };
     function(
@@ -634,6 +662,7 @@ pub(crate) fn invoke_function_traced_jit<C: ContextObject>(
                 vm.syscall_trace_hash as u32,
                 native_start,
                 cu_start,
+                allocation_start,
             )
         });
     }

@@ -6,12 +6,26 @@ use solana_sbpf::{
     elf::Executable,
     memory_region::{MemoryMapping, MemoryRegion},
     program::{BuiltinFunctionDefinition, BuiltinProgram},
-    static_analysis::Analysis,
+    static_analysis::{Analysis, SyscallAllocationSnapshot},
     verifier::RequisiteVerifier,
-    vm::{CallFrame, Config, DynamicAnalysis, EbpfVm, ExecutionMode},
+    vm::{
+        set_syscall_allocation_sampler, CallFrame, Config, DynamicAnalysis, EbpfVm, ExecutionMode,
+    },
 };
-use std::{fs::File, io::Read, path::Path, sync::Arc};
+use stats_alloc::{StatsAlloc, INSTRUMENTED_SYSTEM};
+use std::{alloc::System, fs::File, io::Read, path::Path, sync::Arc};
 use test_utils::{syscalls, TestContextObject};
+
+#[global_allocator]
+static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+
+fn host_allocation_snapshot() -> SyscallAllocationSnapshot {
+    let stats = GLOBAL.stats();
+    SyscallAllocationSnapshot {
+        allocations: stats.allocations as u64,
+        allocated_bytes: stats.bytes_allocated as u64,
+    }
+}
 
 fn main() {
     let matches = App::new("Solana BPF CLI")
@@ -90,6 +104,10 @@ fn main() {
                 .long("prof"),
         )
         .get_matches();
+
+    if matches.is_present("trace") || matches.is_present("syscall-trace") {
+        set_syscall_allocation_sampler(host_allocation_snapshot);
+    }
 
     let mut loader = BuiltinProgram::new_loader(Config {
         enable_register_tracing: matches.is_present("trace") || matches.is_present("profile"),
@@ -245,13 +263,15 @@ fn main() {
                     )
                 };
                 println!(
-                    "{index:5}: pc={:5} hash={:#010x} syscall={} cu={} native_instructions={} native_per_cu={}",
+                    "{index:5}: pc={:5} hash={:#010x} syscall={} cu={} native_instructions={} native_per_cu={} host_allocations={} host_allocated_bytes={}",
                     entry.pc,
                     entry.syscall_hash,
                     syscall_name,
                     entry.compute_units,
                     entry.native_instruction_count,
-                    native_per_cu
+                    native_per_cu,
+                    entry.host_allocations,
+                    entry.host_allocated_bytes
                 );
             }
         }
