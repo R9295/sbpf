@@ -1,4 +1,4 @@
-use clap::{crate_version, App, Arg};
+use clap::{App, Arg};
 use solana_sbpf::{
     aligned_memory::AlignedMemory,
     assembler::assemble,
@@ -15,12 +15,12 @@ use test_utils::{syscalls, TestContextObject};
 
 fn main() {
     let matches = App::new("Solana BPF CLI")
-        .version(crate_version!())
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Solana Maintainers <maintainers@solana.foundation>")
         .about("CLI to test and analyze Solana BPF programs")
         .arg(
             Arg::new("assembler")
-                .about("Assemble and load Solana BPF executable")
+                .help("Assemble and load Solana BPF executable")
                 .short('a')
                 .long("asm")
                 .value_name("FILE")
@@ -29,7 +29,7 @@ fn main() {
         )
         .arg(
             Arg::new("elf")
-                .about("Load ELF as Solana BPF executable")
+                .help("Load ELF as Solana BPF executable")
                 .short('e')
                 .long("elf")
                 .value_name("FILE")
@@ -38,7 +38,7 @@ fn main() {
         )
         .arg(
             Arg::new("input")
-                .about("Input for the program to run on")
+                .help("Input for the program to run on")
                 .short('i')
                 .long("input")
                 .value_name("FILE / BYTES")
@@ -47,7 +47,7 @@ fn main() {
         )
         .arg(
             Arg::new("memory")
-                .about("Heap memory for the program to run on")
+                .help("Heap memory for the program to run on")
                 .short('m')
                 .long("mem")
                 .value_name("BYTES")
@@ -56,7 +56,7 @@ fn main() {
         )
         .arg(
             Arg::new("use")
-                .about("Method of execution to use")
+                .help("Method of execution to use")
                 .short('u')
                 .long("use")
                 .takes_value(true)
@@ -65,7 +65,7 @@ fn main() {
         )
         .arg(
             Arg::new("instruction limit")
-                .about("Limit the number of instructions to execute")
+                .help("Limit the number of instructions to execute")
                 .short('l')
                 .long("lim")
                 .takes_value(true)
@@ -74,13 +74,13 @@ fn main() {
         )
         .arg(
             Arg::new("trace")
-                .about("Display trace using tracing instrumentation")
+                .help("Display trace using tracing instrumentation")
                 .short('t')
                 .long("trace"),
         )
         .arg(
             Arg::new("profile")
-                .about("Display profile using tracing instrumentation")
+                .help("Display profile using tracing instrumentation")
                 .short('p')
                 .long("prof"),
         )
@@ -228,9 +228,22 @@ fn main() {
                     .lookup_by_key(entry.syscall_hash)
                     .map(|(name, _)| String::from_utf8_lossy(name).into_owned())
                     .unwrap_or_else(|| format!("{:#x}", entry.syscall_hash));
+                let native_per_cu = if entry.compute_units == 0 {
+                    "n/a".to_string()
+                } else {
+                    format!(
+                        "{:.2}",
+                        entry.native_instruction_count as f64 / entry.compute_units as f64
+                    )
+                };
                 println!(
-                    "{index:5}: pc={:5} hash={:#010x} syscall={} native_instructions={}",
-                    entry.pc, entry.syscall_hash, syscall_name, entry.native_instruction_count
+                    "{index:5}: pc={:5} hash={:#010x} syscall={} cu={} native_instructions={} native_per_cu={}",
+                    entry.pc,
+                    entry.syscall_hash,
+                    syscall_name,
+                    entry.compute_units,
+                    entry.native_instruction_count,
+                    native_per_cu
                 );
             }
         }

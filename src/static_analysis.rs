@@ -26,6 +26,8 @@ pub struct SyscallTraceEntry {
     pub pc: u64,
     /// Hash used to resolve the syscall.
     pub syscall_hash: u32,
+    /// Compute units consumed across syscall dispatch.
+    pub compute_units: u64,
     /// Native host instructions executed while handling the syscall.
     ///
     /// This is zero when the host does not expose a userspace `rdpmc` perf counter.

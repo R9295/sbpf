@@ -2362,6 +2362,7 @@ fn test_syscall_trace() {
         vm.syscall_trace[0].syscall_hash,
         ebpf::hash_symbol_name(b"bpf_syscall_u64")
     );
+    assert_eq!(vm.syscall_trace[0].compute_units, 2);
 }
 
 declare_builtin_function!(

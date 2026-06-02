@@ -523,25 +523,34 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         pc: u64,
         syscall_hash: u32,
     ) {
-        let start = self.read_syscall_native_instruction_count();
+        let cu_start = self.context().get_remaining();
+        let native_start = self.read_syscall_native_instruction_count();
         self.invoke_function(function);
-        self.push_syscall_trace(pc, syscall_hash, start);
+        self.push_syscall_trace(pc, syscall_hash, native_start, cu_start);
     }
 
     fn read_syscall_native_instruction_count(&mut self) -> Option<u64> {
         self.syscall_instruction_counter.read()
     }
 
-    fn push_syscall_trace(&mut self, pc: u64, syscall_hash: u32, start: Option<u64>) {
-        let native_instruction_count = start
-            .and_then(|start| {
+    fn push_syscall_trace(
+        &mut self,
+        pc: u64,
+        syscall_hash: u32,
+        native_start: Option<u64>,
+        cu_start: u64,
+    ) {
+        let native_instruction_count = native_start
+            .and_then(|native_start| {
                 self.read_syscall_native_instruction_count()
-                    .map(|end| end.saturating_sub(start))
+                    .map(|end| end.saturating_sub(native_start))
             })
             .unwrap_or(0);
+        let compute_units = cu_start.saturating_sub(self.context().get_remaining());
         self.syscall_trace.push(SyscallTraceEntry {
             pc,
             syscall_hash,
+            compute_units,
             native_instruction_count,
         });
     }
@@ -595,10 +604,15 @@ pub(crate) fn invoke_function_traced_jit<C: ContextObject>(
     d: u64,
     e: u64,
 ) {
-    let start = unsafe {
+    let (native_start, cu_start) = unsafe {
         let mut vm: EncryptedHostAddressToEbpfVm<C> =
             EncryptedHostAddressToEbpfVm(vm_addr, PhantomData);
-        vm.with_vm(|vm| vm.read_syscall_native_instruction_count())
+        vm.with_vm(|vm| {
+            (
+                vm.read_syscall_native_instruction_count(),
+                vm.context().get_remaining(),
+            )
+        })
     };
     function(
         EncryptedHostAddressToEbpfVm(vm_addr, PhantomData),
@@ -612,7 +626,12 @@ pub(crate) fn invoke_function_traced_jit<C: ContextObject>(
         let mut vm: EncryptedHostAddressToEbpfVm<C> =
             EncryptedHostAddressToEbpfVm(vm_addr, PhantomData);
         vm.with_vm(|vm| {
-            vm.push_syscall_trace(vm.syscall_trace_pc, vm.syscall_trace_hash as u32, start)
+            vm.push_syscall_trace(
+                vm.syscall_trace_pc,
+                vm.syscall_trace_hash as u32,
+                native_start,
+                cu_start,
+            )
         });
     }
 }
