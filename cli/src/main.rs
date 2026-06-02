@@ -5,13 +5,13 @@ use solana_sbpf::{
     ebpf,
     elf::Executable,
     memory_region::{MemoryMapping, MemoryRegion},
-    program::BuiltinProgram,
+    program::{BuiltinFunctionDefinition, BuiltinProgram},
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
     vm::{CallFrame, Config, DynamicAnalysis, EbpfVm, ExecutionMode},
 };
 use std::{fs::File, io::Read, path::Path, sync::Arc};
-use test_utils::TestContextObject;
+use test_utils::{syscalls, TestContextObject};
 
 fn main() {
     let matches = App::new("Solana BPF CLI")
@@ -86,11 +86,14 @@ fn main() {
         )
         .get_matches();
 
-    let loader = Arc::new(BuiltinProgram::new_loader(Config {
+    let mut loader = BuiltinProgram::new_loader(Config {
         enable_register_tracing: matches.is_present("trace") || matches.is_present("profile"),
         enable_symbol_and_section_labels: true,
         ..Config::default()
-    }));
+    });
+    syscalls::SyscallString::register(&mut loader, "log").unwrap();
+    syscalls::SyscallU64::register(&mut loader, "log_64").unwrap();
+    let loader = Arc::new(loader);
     #[allow(unused_mut)]
     let mut executable = match matches.value_of("assembler") {
         Some(asm_file_name) => {
@@ -216,6 +219,21 @@ fn main() {
             .unwrap()
             .disassemble_register_trace(&mut stdout.lock(), &vm.register_trace)
             .unwrap();
+        if !vm.syscall_trace.is_empty() {
+            println!("\nSyscall Trace:\n");
+            for (index, entry) in vm.syscall_trace.iter().enumerate() {
+                let syscall_name = executable
+                    .get_loader()
+                    .get_function_registry()
+                    .lookup_by_key(entry.syscall_hash)
+                    .map(|(name, _)| String::from_utf8_lossy(name).into_owned())
+                    .unwrap_or_else(|| format!("{:#x}", entry.syscall_hash));
+                println!(
+                    "{index:5}: pc={:5} hash={:#010x} syscall={} native_instructions={}",
+                    entry.pc, entry.syscall_hash, syscall_name, entry.native_instruction_count
+                );
+            }
+        }
     }
     if matches.is_present("profile") {
         let dynamic_analysis = DynamicAnalysis::new(&vm.register_trace, analysis.as_ref().unwrap());

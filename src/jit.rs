@@ -46,7 +46,7 @@ use crate::{
 /// The maximum machine code length in bytes of a program with no guest instructions
 pub const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
 /// The maximum machine code length in bytes of a single guest instruction
-pub const MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION: usize = 110;
+pub const MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION: usize = 192;
 /// The maximum machine code length in bytes of an instruction meter checkpoint
 pub const MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT: usize = 24;
 /// The maximum machine code length of the randomized padding
@@ -360,6 +360,7 @@ pub struct JitCompiler<'a, C: ContextObject> {
     immediate_value_key: i64,
     diversification_rng: SmallRng,
     stopwatch_is_active: bool,
+    current_syscall_hash: u32,
 }
 
 #[rustfmt::skip]
@@ -414,6 +415,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             immediate_value_key,
             diversification_rng,
             stopwatch_is_active: false,
+            current_syscall_hash: 0,
         })
     }
 
@@ -815,7 +817,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     // External syscall
                     if !self.executable.get_sbpf_version().static_syscalls() || insn.src == 0 {
                         if let Some((_, (_, callback))) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
+                            let previous_syscall_hash = self.current_syscall_hash;
+                            self.current_syscall_hash = insn.imm as u32;
                             callback(&mut self);
+                            self.current_syscall_hash = previous_syscall_hash;
                             resolved = true;
                         }
                     }
@@ -1173,6 +1178,12 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     /// Emits a syscall handler invocation
     pub fn emit_external_call(&mut self, function: BuiltinFunction<C>) {
         self.emit_validate_and_profile_instruction_count(0);
+        if self.config.enable_register_tracing {
+            self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
+            self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::SyscallTracePc))));
+            self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.current_syscall_hash as i64));
+            self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::SyscallTraceHash))));
+        }
         self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, function as usize as i64));
         self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL, 5)));
         self.emit_undo_profile_instruction_count(0);
@@ -1523,14 +1534,26 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         if self.config.enable_instruction_meter {
             self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::DueInsnCount)))); // *DueInsnCount = REGISTER_INSTRUCTION_METER;
         }
-        self.emit_rust_call(Value::Register(REGISTER_SCRATCH), &[
-            Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
-            Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[4]) },
-            Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[3]) },
-            Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[2]) },
-            Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[1]) },
-            Argument { index: 0, value: Value::Register(REGISTER_PTR_TO_VM) },
-        ], None);
+        if self.config.enable_register_tracing {
+            self.emit_rust_call(Value::Constant64(crate::vm::invoke_function_traced_jit::<C> as *const u8 as i64, false), &[
+                Argument { index: 6, value: Value::Register(ARGUMENT_REGISTERS[5]) },
+                Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[4]) },
+                Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[3]) },
+                Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[2]) },
+                Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[1]) },
+                Argument { index: 1, value: Value::Register(REGISTER_SCRATCH) },
+                Argument { index: 0, value: Value::Register(REGISTER_PTR_TO_VM) },
+            ], None);
+        } else {
+            self.emit_rust_call(Value::Register(REGISTER_SCRATCH), &[
+                Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
+                Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[4]) },
+                Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[3]) },
+                Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[2]) },
+                Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[1]) },
+                Argument { index: 0, value: Value::Register(REGISTER_PTR_TO_VM) },
+            ], None);
+        }
         if self.config.enable_instruction_meter {
             self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_INSTRUCTION_METER, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter)))); // REGISTER_INSTRUCTION_METER = *PreviousInstructionMeter;
         }

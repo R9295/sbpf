@@ -2319,6 +2319,51 @@ fn test_call_memfrob() {
     );
 }
 
+#[test]
+fn test_syscall_trace() {
+    let config = Config {
+        enable_register_tracing: true,
+        ..Config::default()
+    };
+    let mut loader = BuiltinProgram::new_loader(config);
+    syscalls::SyscallU64::register(&mut loader, "bpf_syscall_u64").unwrap();
+    let executable = assemble::<TestContextObject>(
+        "
+        mov64 r1, 1
+        syscall bpf_syscall_u64
+        exit",
+        Arc::new(loader),
+    )
+    .unwrap();
+    executable.jit_compile().unwrap();
+
+    let mut mem = [0u8; 1];
+    let mem_region = MemoryRegion::new(&raw mut mem, ebpf::MM_INPUT_START);
+    let mut context_object = TestContextObject::new(3);
+    create_vm!(
+        vm,
+        &executable,
+        &mut context_object,
+        stack,
+        heap,
+        vec![mem_region],
+        None
+    );
+    let (_instruction_count, result) = vm.execute_program(
+        &executable,
+        &mut solana_sbpf::vm::ExecutionMode::Jit,
+        &mut [],
+    );
+
+    assert_eq!(result.unwrap(), 0);
+    assert_eq!(vm.syscall_trace.len(), 1);
+    assert_eq!(vm.syscall_trace[0].pc, 1);
+    assert_eq!(
+        vm.syscall_trace[0].syscall_hash,
+        ebpf::hash_symbol_name(b"bpf_syscall_u64")
+    );
+}
+
 declare_builtin_function!(
     /// For test_nested_vm_syscall()
     SyscallNestedVm,

@@ -19,6 +19,19 @@ use std::ptr;
 /// The last register is the program counter (aka pc).
 pub type RegisterTraceEntry = [u64; 12];
 
+/// Native instruction count recorded for one syscall invocation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SyscallTraceEntry {
+    /// Program counter of the syscall instruction.
+    pub pc: u64,
+    /// Hash used to resolve the syscall.
+    pub syscall_hash: u32,
+    /// Native host instructions executed while handling the syscall.
+    ///
+    /// This is zero when the host does not expose a userspace `rdpmc` perf counter.
+    pub native_instruction_count: u64,
+}
+
 /// Used for topological sort
 #[derive(PartialEq, Eq, Debug)]
 pub struct TopologicalIndex {

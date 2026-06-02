@@ -554,7 +554,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
                 // External syscall
                 if !self.executable.get_sbpf_version().static_syscalls() || insn.src == 0 {
                     if let Some((_, (callback, _))) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
-                        self.reg[0] = match self.dispatch_syscall(callback) {
+                        self.reg[0] = match self.dispatch_syscall(callback, insn.imm as u32) {
                             ProgramResult::Ok(value) => *value,
                             ProgramResult::Err(_err) => return false,
                         };
@@ -609,10 +609,19 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         true
     }
 
-    fn dispatch_syscall(&mut self, function: BuiltinFunction<C>) -> &ProgramResult {
+    fn dispatch_syscall(
+        &mut self,
+        function: BuiltinFunction<C>,
+        syscall_hash: u32,
+    ) -> &ProgramResult {
         self.vm.due_insn_count = self.vm.previous_instruction_meter - self.vm.due_insn_count;
         self.vm.registers[0..6].copy_from_slice(&self.reg[0..6]);
-        self.vm.invoke_function(function);
+        if self.executable.get_config().enable_register_tracing {
+            self.vm
+                .invoke_function_traced(function, self.reg[11], syscall_hash);
+        } else {
+            self.vm.invoke_function(function);
+        }
         self.vm.due_insn_count = 0;
         &self.vm.program_result
     }

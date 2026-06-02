@@ -19,7 +19,7 @@ use crate::{
     interpreter::Interpreter,
     memory_region::MemoryMapping,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::{Analysis, DummyContextObject, RegisterTraceEntry},
+    static_analysis::{Analysis, DummyContextObject, RegisterTraceEntry, SyscallTraceEntry},
 };
 // Re-export defaults for direct access without the module path.
 pub use defaults::get_stack_frame_size;
@@ -276,6 +276,10 @@ pub enum RuntimeEnvironmentSlot {
     MemoryMapping = offset_of!(EbpfVm<DummyContextObject>, memory_mapping) as isize,
     /// [EbpfVm::register_trace]
     RegisterTrace = offset_of!(EbpfVm<DummyContextObject>, register_trace) as isize,
+    /// [EbpfVm::syscall_trace_pc]
+    SyscallTracePc = offset_of!(EbpfVm<DummyContextObject>, syscall_trace_pc) as isize,
+    /// [EbpfVm::syscall_trace_hash]
+    SyscallTraceHash = offset_of!(EbpfVm<DummyContextObject>, syscall_trace_hash) as isize,
 }
 
 /// A virtual machine to run eBPF programs.
@@ -364,6 +368,13 @@ pub struct EbpfVm<'a, C: ContextObject> {
     pub loader: Arc<BuiltinProgram<C>>,
     /// Collector for the instruction trace
     pub register_trace: Vec<RegisterTraceEntry>,
+    /// Collector for syscall-level native instruction traces
+    pub syscall_trace: Vec<SyscallTraceEntry>,
+    /// Program counter of the syscall currently dispatched by the JIT
+    pub(crate) syscall_trace_pc: u64,
+    /// Hash of the syscall currently dispatched by the JIT
+    pub(crate) syscall_trace_hash: u64,
+    syscall_instruction_counter: SyscallInstructionCounter,
     /// TCP port for the debugger interface
     #[cfg(feature = "debugger")]
     pub debug_port: Option<u16>,
@@ -410,6 +421,10 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             #[cfg(feature = "debugger")]
             debug_metadata: None,
             register_trace: Vec::default(),
+            syscall_trace: Vec::default(),
+            syscall_trace_pc: 0,
+            syscall_trace_hash: 0,
+            syscall_instruction_counter: SyscallInstructionCounter::default(),
         }
     }
 
@@ -501,6 +516,36 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         );
     }
 
+    /// Invokes a built-in function and records syscall-level native instruction count.
+    pub(crate) fn invoke_function_traced(
+        &mut self,
+        function: BuiltinFunction<C>,
+        pc: u64,
+        syscall_hash: u32,
+    ) {
+        let start = self.read_syscall_native_instruction_count();
+        self.invoke_function(function);
+        self.push_syscall_trace(pc, syscall_hash, start);
+    }
+
+    fn read_syscall_native_instruction_count(&mut self) -> Option<u64> {
+        self.syscall_instruction_counter.read()
+    }
+
+    fn push_syscall_trace(&mut self, pc: u64, syscall_hash: u32, start: Option<u64>) {
+        let native_instruction_count = start
+            .and_then(|start| {
+                self.read_syscall_native_instruction_count()
+                    .map(|end| end.saturating_sub(start))
+            })
+            .unwrap_or(0);
+        self.syscall_trace.push(SyscallTraceEntry {
+            pc,
+            syscall_hash,
+            native_instruction_count,
+        });
+    }
+
     /// Build a `VmAddress` containing a (potentially) encrypted host pointer to self.
     ///
     /// Note that this type is effectively a mutable pointer to `self` and although it valid to
@@ -537,6 +582,273 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         // The `context_object_pointer` is pointing at a valid-to-dereference `C` at all times
         // through the EbpfVm lifetime.
         unsafe { self.memory_mapping.as_mut() }
+    }
+}
+
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+pub(crate) fn invoke_function_traced_jit<C: ContextObject>(
+    vm_addr: u64,
+    function: BuiltinFunction<C>,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+) {
+    let start = unsafe {
+        let mut vm: EncryptedHostAddressToEbpfVm<C> =
+            EncryptedHostAddressToEbpfVm(vm_addr, PhantomData);
+        vm.with_vm(|vm| vm.read_syscall_native_instruction_count())
+    };
+    function(
+        EncryptedHostAddressToEbpfVm(vm_addr, PhantomData),
+        a,
+        b,
+        c,
+        d,
+        e,
+    );
+    unsafe {
+        let mut vm: EncryptedHostAddressToEbpfVm<C> =
+            EncryptedHostAddressToEbpfVm(vm_addr, PhantomData);
+        vm.with_vm(|vm| {
+            vm.push_syscall_trace(vm.syscall_trace_pc, vm.syscall_trace_hash as u32, start)
+        });
+    }
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+struct SyscallInstructionCounter {
+    state: SyscallInstructionCounterState,
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+enum SyscallInstructionCounterState {
+    Uninitialized,
+    Unavailable,
+    Ready(PerfInstructionCounter),
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+impl Default for SyscallInstructionCounter {
+    fn default() -> Self {
+        Self {
+            state: SyscallInstructionCounterState::Uninitialized,
+        }
+    }
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+impl SyscallInstructionCounter {
+    fn read(&mut self) -> Option<u64> {
+        if matches!(self.state, SyscallInstructionCounterState::Uninitialized) {
+            self.state = match PerfInstructionCounter::new() {
+                Some(counter) => SyscallInstructionCounterState::Ready(counter),
+                None => SyscallInstructionCounterState::Unavailable,
+            };
+        }
+        match &self.state {
+            SyscallInstructionCounterState::Ready(counter) => counter.read(),
+            SyscallInstructionCounterState::Uninitialized
+            | SyscallInstructionCounterState::Unavailable => None,
+        }
+    }
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+struct PerfInstructionCounter {
+    fd: libc::c_int,
+    metadata: *const PerfEventMmapPage,
+    metadata_size: usize,
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+impl PerfInstructionCounter {
+    fn new() -> Option<Self> {
+        const PERF_TYPE_HARDWARE: u32 = 0;
+        const PERF_COUNT_HW_INSTRUCTIONS: u64 = 1;
+        const PERF_FLAG_FD_CLOEXEC: libc::c_ulong = 8;
+        const PERF_ATTR_FLAG_EXCLUDE_KERNEL: u64 = 1 << 5;
+        const PERF_ATTR_FLAG_EXCLUDE_HV: u64 = 1 << 6;
+        const PERF_CAP_USER_RDPMC: u64 = 1 << 2;
+
+        let mut attr = PerfEventAttr::default();
+        attr.type_ = PERF_TYPE_HARDWARE;
+        attr.size = std::mem::size_of::<PerfEventAttr>() as u32;
+        attr.config = PERF_COUNT_HW_INSTRUCTIONS;
+        attr.flags = PERF_ATTR_FLAG_EXCLUDE_KERNEL | PERF_ATTR_FLAG_EXCLUDE_HV;
+
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_perf_event_open,
+                &attr as *const PerfEventAttr,
+                0i32,
+                -1i32,
+                -1i32,
+                PERF_FLAG_FD_CLOEXEC,
+            )
+        } as libc::c_int;
+        if fd < 0 {
+            return None;
+        }
+
+        let metadata_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if metadata_size <= 0 {
+            unsafe {
+                libc::close(fd);
+            }
+            return None;
+        }
+        let metadata_size = metadata_size as usize;
+        let metadata = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                metadata_size,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        if metadata == libc::MAP_FAILED {
+            unsafe {
+                libc::close(fd);
+            }
+            return None;
+        }
+
+        let counter = Self {
+            fd,
+            metadata: metadata.cast::<PerfEventMmapPage>(),
+            metadata_size,
+        };
+        let capabilities = unsafe { ptr::read_volatile(&(*counter.metadata).capabilities) };
+        if capabilities & PERF_CAP_USER_RDPMC == 0 {
+            drop(counter);
+            return None;
+        }
+        Some(counter)
+    }
+
+    fn read(&self) -> Option<u64> {
+        use std::sync::atomic::{compiler_fence, Ordering};
+
+        loop {
+            let metadata = unsafe { &*self.metadata };
+            let sequence = unsafe { ptr::read_volatile(&metadata.lock) };
+            compiler_fence(Ordering::Acquire);
+            let index = unsafe { ptr::read_volatile(&metadata.index) };
+            let offset = unsafe { ptr::read_volatile(&metadata.offset) };
+            let pmc_width = unsafe { ptr::read_volatile(&metadata.pmc_width) };
+            if index == 0 {
+                return None;
+            }
+            let pmc = unsafe { rdpmc(index - 1) };
+            let pmc = if pmc_width == 0 || pmc_width >= 64 {
+                pmc as i64
+            } else {
+                let shift = 64 - pmc_width as u32;
+                ((pmc << shift) as i64) >> shift
+            };
+            let count = (offset as i128 + pmc as i128) as u64;
+            compiler_fence(Ordering::Release);
+            let sequence_after = unsafe { ptr::read_volatile(&metadata.lock) };
+            if sequence == sequence_after && sequence & 1 == 0 {
+                return Some(count);
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+impl Drop for PerfInstructionCounter {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.metadata.cast_mut().cast(), self.metadata_size);
+            libc::close(self.fd);
+        }
+    }
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+#[repr(C)]
+struct PerfEventAttr {
+    type_: u32,
+    size: u32,
+    config: u64,
+    sample_period: u64,
+    sample_type: u64,
+    read_format: u64,
+    flags: u64,
+    wakeup_events: u32,
+    bp_type: u32,
+    config1: u64,
+    config2: u64,
+    branch_sample_type: u64,
+    sample_regs_user: u64,
+    sample_stack_user: u32,
+    clockid: i32,
+    sample_regs_intr: u64,
+    aux_watermark: u32,
+    sample_max_stack: u16,
+    reserved_2: u16,
+    aux_sample_size: u32,
+    aux_action: u32,
+    sig_data: u64,
+    config3: u64,
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+impl Default for PerfEventAttr {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+#[repr(C)]
+struct PerfEventMmapPage {
+    version: u32,
+    compat_version: u32,
+    lock: u32,
+    index: u32,
+    offset: i64,
+    time_enabled: u64,
+    time_running: u64,
+    capabilities: u64,
+    pmc_width: u16,
+    time_shift: u16,
+    time_mult: u32,
+    time_offset: u64,
+    time_zero: u64,
+    size: u32,
+    reserved_1: u32,
+    time_cycles: u64,
+    time_mask: u64,
+}
+
+#[cfg(all(feature = "jit", target_os = "linux", target_arch = "x86_64"))]
+unsafe fn rdpmc(counter: u32) -> u64 {
+    let low: u32;
+    let high: u32;
+    std::arch::asm!(
+        "rdpmc",
+        in("ecx") counter,
+        out("eax") low,
+        out("edx") high,
+        options(nomem, nostack, preserves_flags),
+    );
+    ((high as u64) << 32) | low as u64
+}
+
+#[cfg(not(all(feature = "jit", target_os = "linux", target_arch = "x86_64")))]
+#[derive(Default)]
+struct SyscallInstructionCounter;
+
+#[cfg(not(all(feature = "jit", target_os = "linux", target_arch = "x86_64")))]
+impl SyscallInstructionCounter {
+    fn read(&mut self) -> Option<u64> {
+        None
     }
 }
 
@@ -649,5 +961,7 @@ mod tests {
         check_slot!(env, program_result, ProgramResult);
         check_slot!(env, memory_mapping, MemoryMapping);
         check_slot!(env, register_trace, RegisterTrace);
+        check_slot!(env, syscall_trace_pc, SyscallTracePc);
+        check_slot!(env, syscall_trace_hash, SyscallTraceHash);
     }
 }
