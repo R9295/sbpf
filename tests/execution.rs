@@ -2322,7 +2322,7 @@ fn test_call_memfrob() {
 #[test]
 fn test_syscall_trace() {
     let config = Config {
-        enable_register_tracing: true,
+        enable_syscall_tracing: true,
         ..Config::default()
     };
     let mut loader = BuiltinProgram::new_loader(config);
@@ -2356,6 +2356,7 @@ fn test_syscall_trace() {
     );
 
     assert_eq!(result.unwrap(), 0);
+    assert!(vm.register_trace.is_empty());
     assert_eq!(vm.syscall_trace.len(), 1);
     assert_eq!(vm.syscall_trace[0].pc, 1);
     assert_eq!(

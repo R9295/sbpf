@@ -616,7 +616,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
     ) -> &ProgramResult {
         self.vm.due_insn_count = self.vm.previous_instruction_meter - self.vm.due_insn_count;
         self.vm.registers[0..6].copy_from_slice(&self.reg[0..6]);
-        if self.executable.get_config().enable_register_tracing {
+        if self.executable.get_config().enable_syscall_tracing {
             self.vm
                 .invoke_function_traced(function, self.reg[11], syscall_hash);
         } else {

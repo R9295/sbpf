@@ -126,6 +126,8 @@ pub struct Config {
     pub enable_instruction_meter: bool,
     /// Enable instruction tracing
     pub enable_register_tracing: bool,
+    /// Enable syscall-level tracing
+    pub enable_syscall_tracing: bool,
     /// Enable dynamic string allocation for labels
     pub enable_symbol_and_section_labels: bool,
     /// Reject ELF files containing issues that the verifier did not catch before (up to v0.2.21)
@@ -163,6 +165,7 @@ impl Default for Config {
             instruction_meter_checkpoint_distance: 10000,
             enable_instruction_meter: true,
             enable_register_tracing: false,
+            enable_syscall_tracing: false,
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,
             #[cfg(feature = "jit")]

@@ -1178,7 +1178,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     /// Emits a syscall handler invocation
     pub fn emit_external_call(&mut self, function: BuiltinFunction<C>) {
         self.emit_validate_and_profile_instruction_count(0);
-        if self.config.enable_register_tracing {
+        if self.config.enable_syscall_tracing {
             self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
             self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::SyscallTracePc))));
             self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.current_syscall_hash as i64));
@@ -1534,7 +1534,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         if self.config.enable_instruction_meter {
             self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::DueInsnCount)))); // *DueInsnCount = REGISTER_INSTRUCTION_METER;
         }
-        if self.config.enable_register_tracing {
+        if self.config.enable_syscall_tracing {
             self.emit_rust_call(Value::Constant64(crate::vm::invoke_function_traced_jit::<C> as *const u8 as i64, false), &[
                 Argument { index: 6, value: Value::Register(ARGUMENT_REGISTERS[5]) },
                 Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[4]) },

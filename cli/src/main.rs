@@ -79,6 +79,11 @@ fn main() {
                 .long("trace"),
         )
         .arg(
+            Arg::new("syscall-trace")
+                .help("Display syscall trace using syscall tracing instrumentation")
+                .long("syscall-trace"),
+        )
+        .arg(
             Arg::new("profile")
                 .help("Display profile using tracing instrumentation")
                 .short('p')
@@ -88,6 +93,7 @@ fn main() {
 
     let mut loader = BuiltinProgram::new_loader(Config {
         enable_register_tracing: matches.is_present("trace") || matches.is_present("profile"),
+        enable_syscall_tracing: matches.is_present("trace") || matches.is_present("syscall-trace"),
         enable_symbol_and_section_labels: true,
         ..Config::default()
     });
@@ -219,8 +225,10 @@ fn main() {
             .unwrap()
             .disassemble_register_trace(&mut stdout.lock(), &vm.register_trace)
             .unwrap();
+    }
+    if matches.is_present("trace") || matches.is_present("syscall-trace") {
         if !vm.syscall_trace.is_empty() {
-            println!("\nSyscall Trace:\n");
+            println!("Syscall Trace:\n");
             for (index, entry) in vm.syscall_trace.iter().enumerate() {
                 let syscall_name = executable
                     .get_loader()
