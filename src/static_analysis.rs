@@ -38,6 +38,25 @@ impl SyscallAllocationSnapshot {
     }
 }
 
+/// Sampled host memory operation counters recorded at a point in time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SyscallMemoryOperationSnapshot {
+    /// Sampled host load-like memory operations.
+    pub sampled_loads: u64,
+    /// Sampled host store-like memory operations.
+    pub sampled_stores: u64,
+}
+
+impl SyscallMemoryOperationSnapshot {
+    /// Returns the saturating delta from an earlier snapshot.
+    pub fn delta_since(self, earlier: Self) -> Self {
+        Self {
+            sampled_loads: self.sampled_loads.saturating_sub(earlier.sampled_loads),
+            sampled_stores: self.sampled_stores.saturating_sub(earlier.sampled_stores),
+        }
+    }
+}
+
 /// Native instruction count recorded for one syscall invocation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SyscallTraceEntry {
@@ -55,6 +74,10 @@ pub struct SyscallTraceEntry {
     pub host_allocations: u64,
     /// Host bytes allocated while handling the syscall.
     pub host_allocated_bytes: u64,
+    /// Sampled host load-like memory operations while handling the syscall.
+    pub sampled_memory_loads: u64,
+    /// Sampled host store-like memory operations while handling the syscall.
+    pub sampled_memory_stores: u64,
 }
 
 /// Used for topological sort

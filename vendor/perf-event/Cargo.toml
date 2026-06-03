@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "perf-event",
+    "perf-event-open-sys",
+]
+resolver = "2"

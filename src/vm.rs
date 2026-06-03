@@ -21,7 +21,7 @@ use crate::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::{
         Analysis, DummyContextObject, RegisterTraceEntry, SyscallAllocationSnapshot,
-        SyscallTraceEntry,
+        SyscallMemoryOperationSnapshot, SyscallTraceEntry,
     },
 };
 // Re-export defaults for direct access without the module path.
@@ -44,13 +44,29 @@ pub type SyscallAllocationSampler = fn() -> SyscallAllocationSnapshot;
 static SYSCALL_ALLOCATION_SAMPLER: std::sync::RwLock<Option<SyscallAllocationSampler>> =
     std::sync::RwLock::new(None);
 
+/// Function used to sample host memory operation counters for syscall tracing.
+pub type SyscallMemoryOperationSampler = fn() -> SyscallMemoryOperationSnapshot;
+
+static SYSCALL_MEMORY_OPERATION_SAMPLER: std::sync::RwLock<Option<SyscallMemoryOperationSampler>> =
+    std::sync::RwLock::new(None);
+
 /// Installs the host allocation sampler used by syscall tracing.
 pub fn set_syscall_allocation_sampler(sampler: SyscallAllocationSampler) {
     *SYSCALL_ALLOCATION_SAMPLER.write().unwrap() = Some(sampler);
 }
 
+/// Installs the host memory operation sampler used by syscall tracing.
+pub fn set_syscall_memory_operation_sampler(sampler: SyscallMemoryOperationSampler) {
+    *SYSCALL_MEMORY_OPERATION_SAMPLER.write().unwrap() = Some(sampler);
+}
+
 fn read_syscall_allocation_snapshot() -> Option<SyscallAllocationSnapshot> {
     let sampler = *SYSCALL_ALLOCATION_SAMPLER.read().unwrap();
+    sampler.map(|sampler| sampler())
+}
+
+fn read_syscall_memory_operation_snapshot() -> Option<SyscallMemoryOperationSnapshot> {
+    let sampler = *SYSCALL_MEMORY_OPERATION_SAMPLER.read().unwrap();
     sampler.map(|sampler| sampler())
 }
 
@@ -546,10 +562,18 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         syscall_hash: u32,
     ) {
         let cu_start = self.context().get_remaining();
+        let memory_operation_start = read_syscall_memory_operation_snapshot();
         let allocation_start = read_syscall_allocation_snapshot();
         let native_start = self.read_syscall_native_instruction_count();
         self.invoke_function(function);
-        self.push_syscall_trace(pc, syscall_hash, native_start, cu_start, allocation_start);
+        self.push_syscall_trace(
+            pc,
+            syscall_hash,
+            native_start,
+            cu_start,
+            allocation_start,
+            memory_operation_start,
+        );
     }
 
     fn read_syscall_native_instruction_count(&mut self) -> Option<u64> {
@@ -563,6 +587,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         native_start: Option<u64>,
         cu_start: u64,
         allocation_start: Option<SyscallAllocationSnapshot>,
+        memory_operation_start: Option<SyscallMemoryOperationSnapshot>,
     ) {
         let native_instruction_count = native_start
             .and_then(|native_start| {
@@ -576,6 +601,12 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                 read_syscall_allocation_snapshot().map(|end| end.delta_since(allocation_start))
             })
             .unwrap_or_default();
+        let memory_operation_delta = memory_operation_start
+            .and_then(|memory_operation_start| {
+                read_syscall_memory_operation_snapshot()
+                    .map(|end| end.delta_since(memory_operation_start))
+            })
+            .unwrap_or_default();
         self.syscall_trace.push(SyscallTraceEntry {
             pc,
             syscall_hash,
@@ -583,6 +614,8 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             native_instruction_count,
             host_allocations: allocation_delta.allocations,
             host_allocated_bytes: allocation_delta.allocated_bytes,
+            sampled_memory_loads: memory_operation_delta.sampled_loads,
+            sampled_memory_stores: memory_operation_delta.sampled_stores,
         });
     }
 
@@ -635,14 +668,20 @@ pub(crate) fn invoke_function_traced_jit<C: ContextObject>(
     d: u64,
     e: u64,
 ) {
-    let (native_start, cu_start, allocation_start) = unsafe {
+    let (native_start, cu_start, allocation_start, memory_operation_start) = unsafe {
         let mut vm: EncryptedHostAddressToEbpfVm<C> =
             EncryptedHostAddressToEbpfVm(vm_addr, PhantomData);
         vm.with_vm(|vm| {
             let cu_start = vm.context().get_remaining();
+            let memory_operation_start = read_syscall_memory_operation_snapshot();
             let allocation_start = read_syscall_allocation_snapshot();
             let native_start = vm.read_syscall_native_instruction_count();
-            (native_start, cu_start, allocation_start)
+            (
+                native_start,
+                cu_start,
+                allocation_start,
+                memory_operation_start,
+            )
         })
     };
     function(
@@ -663,6 +702,7 @@ pub(crate) fn invoke_function_traced_jit<C: ContextObject>(
                 native_start,
                 cu_start,
                 allocation_start,
+                memory_operation_start,
             )
         });
     }

@@ -263,7 +263,7 @@ fn main() {
                     )
                 };
                 println!(
-                    "{index:5}: pc={:5} hash={:#010x} syscall={} cu={} native_instructions={} native_per_cu={} host_allocations={} host_allocated_bytes={}",
+                    "{index:5}: pc={:5} hash={:#010x} syscall={} cu={} native_instructions={} native_per_cu={} host_allocations={} host_allocated_bytes={} sampled_memory_loads={} sampled_memory_stores={}",
                     entry.pc,
                     entry.syscall_hash,
                     syscall_name,
@@ -271,7 +271,9 @@ fn main() {
                     entry.native_instruction_count,
                     native_per_cu,
                     entry.host_allocations,
-                    entry.host_allocated_bytes
+                    entry.host_allocated_bytes,
+                    entry.sampled_memory_loads,
+                    entry.sampled_memory_stores
                 );
             }
         }
